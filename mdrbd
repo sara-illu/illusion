@@ -1,0 +1,148 @@
+#!/bin/bash -xv
+# sara elb wrote this script to monitor drbd resources. I made it sort of functions
+#to let myself run the test i need based on result of other tests
+#apply for drbd 8.4
+# still may contain errors 
+#####################Define variables#######################
+#Split Brain
+sbrain=`dmesg | grep -q -i 'Split-Brain'`
+
+#resource name
+rname=`drbd-overview | awk '{ print $1 }' | cut -d":" -f2`
+#IO Load
+epio=`cat /proc/drbd | awk '{print $11}'| cut -d":" -f2 | sed '/^$/d'`#still need to catch the correct ressource name incaase multiple ressource exists
+#resource role
+srole=`cat /proc/drbd | grep -o -i secondary | wc -w`
+prole=`cat /proc/drbd | grep -o -i primary | wc -w`
+urole=`cat /proc/drbd | grep -o -i Unknown | wc -w`
+
+#Connection state
+rsconn=`drbdadm cstate $rname | grep -i Connected`
+rcstate=`drbdadm cstate $rname`
+
+
+#Disk states
+dstate=`drbdadm dstate $rname | grep -o -i uptodate | wc -w`
+#io state
+diostat=`drbd-overview | grep -i "$rname" | awk '{print $6}'`
+diskless=`drbdadm dstate $rname | grep -w -i Diskless`
+failed=`drbdadm dstate $rname | grep -w -i Failed`
+inconsistent=`drbdadm dstate $rname | grep -w -i Inconsistent`
+outdated=`drbdadm dstate $rname | grep -w -i Outdated`
+dunknown=`drbdadm dstate $rname | grep -w -i DUnknown`
+consistent=`drbdadm dstate $rname | grep -w -i Consistent`
+#oos=``
+
+#peers
+#localres=`drbd-overview | egrep -o -i 'uptodate|' | awk 'BEGIN {RS=""}{print $1}'` # instead of grep do an awk
+#peerres=`drbd-overview | egrep -o -i 'uptodate|' | awk 'BEGIN {RS=""}{print $2}'`
+localres=`drbdadm dstate $rname | cut -d"/" -f1`
+peerres=`drbdadm dstate $rname | cut -d"/" -f2`
+#online verification
+#ovdatasync=`drbdadm verify`
+oos=`cat /proc/drbd | awk '{ print $ }'`
+####################################################################################################################
+
+# Define functions
+chckiostat()
+{
+[[ $diostat =~ ^s. ]] && echo 'Flag is s: Suspended I/O, normally r';
+
+if [[ $diostat =~ !r-{5} ]]; then
+
+for((i=1;i<${#diostat};i++))
+do
+if [[ ${diostat:i:1} =~ [apus] ]] && [[ $i -ne 4 ]]; then
+#if [[ ${diostat:i:1} =~ - ]] && [[ $i -ne 4 ]]; then
+[[ ${diostat:i:1} == "a" ]] && echo 'Deferred  resynchronization, is there any resync-after dependency? Flag is'.${diostat:i:1}.'Normally -';
+[[ ${diostat:i:1} == "p" ]] && echo 'Peer-initiated sync suspension. Flag is'.${diostat:i:1}.'Normally -';
+[[ ${diostat:i:1} == "u" ]] && echo 'Locally initiated sync suspension.Flag is'.${diostat:i:1}.'Normally -';
+[[ ${diostat:i:1} == "s" ]] && echo 'Activity Log update suspension. Flag is'.${diostat:i:1}.'Normally -';
+
+#elif [[ ${diostat:4:1} =~ [dbna] ]] && [$i -eq 4  ]; then
+elif [ $i -eq 4 ]; then
+[[ ${diostat:4:1} =~ [dbna] ]] && echo 'Locally blocked I/O, flag is'.${diostat:4:1}.'';
+fi
+done
+fi
+return 0;
+
+}
+
+chckdiskstat()
+{
+
+if [ $dstate -ne 2 ] && echo 'Something is going on. Data is not UpToDate'; then
+[[ -n $diskless ]] && echo 'Diskless mode';
+[[ -n $failed ]] && echo 'I/O failure, going into diskless mode';
+[[ -n $inconsistent ]] && echo 'The data is inconsistent';
+[[ -n $outdated ]] &&  echo 'Node no longer in sync with the primary node. Temporary or permanent interruption of the replication link may be the cause';
+[[ -n $dunknown ]] && echo 'No network connection is available';
+[[ -n $consistent ]] && echo 'Network failure. Consistent data of a node without CONNECTION';
+fi
+return 0;
+
+}
+
+chckrrole()
+{
+[ $srole -eq 2 ] && echo 'No primary, ressources are both in secondary mode';
+[ $prole -eq 2 ] && echo 'No secondary, ressources are both in primary mode, have you configured DRBD to use dual primary mode? if so, no worries.';
+[ $urole -gt 0 ] && echo 'Unknow ressource role, peer is probably in disconnected mode';
+
+return 0;
+}
+
+chckconnection()
+{
+if [[ $rsconn =~ ^\s*$ ]]; then
+echo 'Ressource is not connected';
+#if [[ $rcstate =~ (StandAlone|Disconnecting|PausedSyncS|PausedSyncT|NetworkFailure|BrokenPipe|ProtocolError|TearDown|WFConnection|Timeout) ]];then
+case $rcstate in
+
+StandAlone)  echo ''.$rcstate'No network configuration available. Possibly: failed authentication or split brain. Or May be you run drbdadm disconnect?'
+;;
+Disconnecting) echo 'Disconnecting. Next state is StandAlone.'
+ ;;
+PausedSyncS|PausedSyncT) echo 'State:'.$rcstate'Synchronization is currently paused. May be you run  drbdadm pause-sync?'
+;;
+NetworkFailure|BrokenPipe|ProtocolError) echo 'State:'.$rcstate'Connection to the partner was lost. Next state: Unconnected'
+;;
+TearDown) echo ''.$rcstate'Peer is closing the connection. Next state: Unconnected.'
+;;
+WFConnection) echo ''.$rcstate'This node is waiting until the peer node becomes visible on the network.'
+;;
+Timeout) echo ''.$rcstate'Timeout in the communication with the peer. Next state: Unconnected.'
+;;
+*) echo 'No worries either synchro or online verification are run currently'.$rcstate''
+;;
+esac
+fi
+return 0;
+
+}
+#chcksynchro()
+#{
+#verify
+# Out of sync
+#}
+chcksbrain()
+{
+dmesg | grep -q -i 'Split-Brain';
+[ $? -eq 0 ] && echo 'Split-Brain detected, dropping connection!';
+}
+#chckload()
+#{
+#[ $epio -gt 1 ] && echo 'Usually 1. Might increase under I/O load'
+#still to see
+#[[ $epio ==  "1" ]] && echo 'Usually 1. Might increase under I/O load';
+
+#}
+
+
+chckconnection;
+chcksbrain;
+chckrrole;
+chckdiskstat;
+chckiostat;
+#chckload;
