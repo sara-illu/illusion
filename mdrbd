@@ -1,5 +1,5 @@
 #!/bin/bash -xv
-# sara elb wrote this script to monitor drbd resources. I made it sort of functions
+# to monitor drbd resources. I made it sort of functions
 #to let myself run the test i need based on result of other tests
 #apply for drbd 8.4
 # still may contain errors 
